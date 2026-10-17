@@ -1,0 +1,28 @@
+# Persona council for product/strategy questions: each member argues from one
+# stakeholder's point of view. Put the most important persona on the strongest model.
+
+[council]
+language = "English"
+timeout_s = 1800
+reviewers = ["agy:gemini-4-argon-high", "codex:gpt-6.1-sol@xhigh", "agy:claude-opus-5-5-high"]
+boss = "agy:claude-opus-5-5-high"
+
+[[member]]
+spec = "codex:gpt-6.1-sol@xhigh"
+role = "Growth strategist and devil's advocate: question whether the differentiation is defensible, solve cold start, name the risks others will miss."
+
+[[member]]
+spec = "agy:claude-opus-5-5-high"
+role = "Partnerships lead: design concrete partner models, what each side gains, how impact is measured, and the legal/ethical red lines."
+
+[[member]]
+spec = "agy:gemini-4-argon-high"
+role = "Product designer: the experience, rituals and visual identity that make the product memorable without becoming kitsch."
+
+[[member]]
+spec = "opencode:opencode/glm-5.3-flash-free@max"
+role = "Young target user (19-24): why you would install it, why you would delete it, what feels cringe."
+
+[[member]]
+spec = "opencode:opencode/deepseek-v4.1-flash-free@max"
+role = "Niche power user: the features a dedicated segment would pay attention to, and the traps that would push them away."

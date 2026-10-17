@@ -1,0 +1,15 @@
+# Cheap smoke test: low effort, one member per backend.
+[council]
+language = "English"
+timeout_s = 600
+reviewers = ["agy:gemini-4-argon-low", "opencode:opencode/glm-5.3-flash-free@low"]
+boss = "codex:gpt-6.1-sol@low"
+
+[[member]]
+spec = "codex:gpt-6.1-sol@low"
+
+[[member]]
+spec = "agy:gemini-4-argon-low"
+
+[[member]]
+spec = "opencode:opencode/glm-5.3-flash-free@low"

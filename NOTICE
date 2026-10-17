@@ -1,0 +1,14 @@
+konsey-cli
+Copyright (c) 2026 Selman Durmaz — MIT License (see LICENSE)
+
+Portions of council.py (subprocess hygiene, anonymized boss synthesis and
+fallback-merge design) are adapted from the code skeleton in
+paldom/llm-council-skills (skills/llm-council-harness/references/harness-invocation.md):
+
+  MIT License
+  Copyright (c) 2026 Paldom
+  https://github.com/Paldom/llm-council-skills
+
+The three-stage council design (independent answers, anonymized peer review,
+chairman synthesis) follows karpathy/llm-council:
+  https://github.com/karpathy/llm-council
