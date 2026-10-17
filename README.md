@@ -1,6 +1,24 @@
 # konsey-cli
 
-*Konsey* is Turkish for *council*.
+*Konsey* is Turkish for *council*, and a nod to the shadowy Konsey of the Turkish TV series *Kurtlar Vadisi*.
+
+> *Loş bir oda. Uzun bir masa. Etrafında yüzü görünmeyen beş üye.*
+>
+> **Başkan:** Soru masada. Herkes cevabını ayrı yazacak. Kimin ne yazdığını kimse bilmeyecek.
+>
+> **Üye C:** Cevabım hazır, efendim.
+>
+> **Başkan:** İsimler kapatıldı. Şimdi birbirinizi puanlayın.
+>
+> *(Üye A kendi cevabını birinci sıraya yazar. Kimse şaşırmaz.)*
+>
+> **Başkan:** Herkes kendi cevabını beğenir. O yüzden son sözü Konsey söyler.
+>
+> **Üye E** *(1800 saniyedir cevap vermiyor)***:** Merhamet edin efendim…
+>
+> **Başkan:** `taskkill /T /F`.
+>
+> *(Torunlarıyla birlikte.)*
 
 **Run a [karpathy/llm-council](https://github.com/karpathy/llm-council)-style council across the coding-agent CLIs you already pay for:** Codex, Antigravity (Gemini and Claude), OpenCode (GLM, DeepSeek, any provider) and Claude Code. NVIDIA's API works too.
 
