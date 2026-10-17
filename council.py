@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """LLM council over headless agent CLIs (Codex, Antigravity, OpenCode, Claude Code)
 plus plain NVIDIA API members. Stdlib only; runs on Windows, macOS and Linux.
 
@@ -26,6 +27,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -64,7 +66,10 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
-        os.killpg(proc.pid, 9)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # start_new_session: pgid == pid
+        except ProcessLookupError:
+            pass
 
 
 def _run(cmd: list[str], cwd: str, timeout: int, stdin_text: str | None = None,

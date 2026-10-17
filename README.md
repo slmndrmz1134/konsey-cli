@@ -1,5 +1,7 @@
 # konsey-cli
 
+[![ci](https://github.com/slmndrmz1134/konsey-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/slmndrmz1134/konsey-cli/actions/workflows/ci.yml)
+
 *Konsey* is Turkish for *council*, and a nod to the shadowy Konsey of the Turkish TV series *Kurtlar Vadisi*.
 
 > *Loş bir oda. Uzun bir masa. Etrafında yüzü görünmeyen beş üye.*
@@ -43,22 +45,42 @@ stage 3  a chair model synthesizes one decisive answer from answers + reviews
 
 ## Requirements
 
-- Python 3.11+ (only `tomllib` and the stdlib).
-- Any subset of these CLIs, logged in:
+- **Python 3.11+.** It only uses the stdlib; `tomllib` is new in 3.11.
+  - macOS: `brew install python`. The system `python3` is often older than 3.11.
+  - Linux: your distro's `python3` (Ubuntu 24.04+ ships 3.12).
+  - Windows: install from python.org or with `winget install Python.Python.3.13`.
+- **Any subset of these CLIs, installed and logged in.** Only seat the ones you have.
   - `codex` (OpenAI Codex CLI)
   - `agy` (Google Antigravity CLI)
   - `opencode`
   - `claude` (Claude Code)
-- For `nvidia:` members, `NVIDIA_API_KEY` set in the environment.
+
+  If `agy` is not on your `PATH`, point `AGY_EXE` at it.
+- **For `nvidia:` members,** set `NVIDIA_API_KEY` in the environment.
+
+CI runs the tests on **Linux, macOS and Windows** with Python 3.11 and 3.13.
 
 ## Quick start
+
+macOS / Linux:
 
 ```bash
 git clone https://github.com/slmndrmz1134/konsey-cli && cd konsey-cli
 echo "Should a two-person team build its backend on Supabase or a custom Go API?" > q.md
-python council.py --config examples/smoke.toml --question-file q.md --out runs/smoke
+python3 council.py --config examples/smoke.toml --question-file q.md --out runs/smoke
 cat runs/smoke/final.md
 ```
+
+Windows (PowerShell):
+
+```powershell
+git clone https://github.com/slmndrmz1134/konsey-cli; cd konsey-cli
+"Should a two-person team build its backend on Supabase or a custom Go API?" | Out-File -Encoding utf8 q.md
+python council.py --config examples\smoke.toml --question-file q.md --out runs\smoke
+Get-Content runs\smoke\final.md
+```
+
+Edit `examples/smoke.toml` first so it only lists CLIs you have installed. The tests don't need any agent CLI: `python3 -m unittest discover -s tests -v`.
 
 Output files:
 
@@ -128,7 +150,13 @@ Example configs: `examples/smoke.toml` (cheap, low effort), `examples/fleet.toml
 `skill/konsey/SKILL.md` is a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills) that teaches Claude to run this tool. To install it:
 
 ```bash
-cp -r skill/konsey ~/.claude/skills/
+# macOS / Linux
+mkdir -p ~/.claude/skills && cp -r skill/konsey ~/.claude/skills/
+```
+
+```powershell
+# Windows
+Copy-Item -Recurse skill\konsey "$env:USERPROFILE\.claude\skills\"
 ```
 
 ### Basic usage

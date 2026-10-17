@@ -7,7 +7,7 @@ description: Runs a multi-model LLM council (karpathy/llm-council style) over lo
 
 ## Steps
 
-1. **Locate the tool.** Find `council.py` from the konsey-cli clone; ask the user if it
+1. **Locate the tool.** Use `python3` on macOS/Linux and `python` on Windows. Find `council.py` from the konsey-cli clone; ask the user if it
    is not on disk. Check which CLIs are installed and logged in (`codex`, `agy`,
    `opencode`, `claude`) and only seat members whose CLI exists.
 2. **Write the question** to a file. Put shared background in a separate context file.
