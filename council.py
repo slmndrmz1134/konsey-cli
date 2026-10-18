@@ -138,8 +138,17 @@ def run_opencode(model, effort, prompt, scratch, timeout):
            "-m", model, "--format", "json", "--dir", scratch, "-f", str(pf)]
     if effort:
         cmd[4:4] = ["--variant", effort]
-    # opencode's config resolves the NVIDIA provider key from the env at startup
-    out = _run(cmd, scratch, timeout, keep_env=("NVIDIA_API_KEY",))
+    # opencode's config resolves the NVIDIA provider key from the env at startup.
+    # Parallel opencode members share one local SQLite store and can collide on
+    # startup ("database is locked"); back off and retry instead of failing.
+    for attempt in range(4):
+        try:
+            out = _run(cmd, scratch, timeout, keep_env=("NVIDIA_API_KEY",))
+            break
+        except RuntimeError as exc:
+            if "database is locked" not in str(exc) or attempt == 3:
+                raise
+            time.sleep(3 + 4 * attempt + random.random() * 3)
     parts = []
     for line in out.splitlines():
         try:

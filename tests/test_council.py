@@ -89,6 +89,29 @@ def failing_backend(model, effort, prompt, scratch, timeout):
     raise RuntimeError("simulated quota error")
 
 
+class OpencodeRetryTest(unittest.TestCase):
+    def test_database_locked_is_retried(self):
+        calls = []
+        event = json.dumps({"type": "text", "part": {"text": "an answer that is long enough to count"}})
+
+        def fake_run(cmd, cwd, timeout, stdin_text=None, keep_env=()):
+            calls.append(cmd)
+            if len(calls) == 1:
+                raise RuntimeError("opencode exited 1: Error: Unexpected error\n\ndatabase is locked")
+            return event
+
+        with mock.patch.object(council, "_run", fake_run), mock.patch.object(council.time, "sleep"):
+            text = council.run_opencode("opencode/x", "high", "prompt", tempfile.mkdtemp(), 60)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("long enough", text)
+
+    def test_other_errors_are_not_retried(self):
+        with mock.patch.object(council, "_run", side_effect=RuntimeError("boom")) as run:
+            with self.assertRaises(RuntimeError):
+                council.run_opencode("opencode/x", None, "prompt", tempfile.mkdtemp(), 60)
+        self.assertEqual(run.call_count, 1)
+
+
 class PipelineTest(unittest.TestCase):
     def test_end_to_end_with_fake_backends_and_one_failing_member(self):
         work = Path(tempfile.mkdtemp())
