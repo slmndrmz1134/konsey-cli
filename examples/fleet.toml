@@ -1,3 +1,6 @@
+# TEMPLATE: the model names below are one author's fleet, not defaults that will work
+# for you. Replace every spec with models your own accounts can run, then test the
+# seats with:  python council.py --config <this file> --check
 # Default council: strong thinkers + free volume models.
 # Spec format: "<backend>:<model>[@effort]"  (see council.py docstring)
 # Members without a `role` get a lens (precision / breadth / skeptic) round-robin.
@@ -11,6 +14,9 @@ reviewers = [
   "agy:claude-opus-5-5-high",
 ]
 boss = "agy:claude-opus-5-5-high"   # "none" = stop after reviews (caller synthesizes)
+boss_fallback = "codex:gpt-6.1-sol@xhigh"   # if the chair fails (e.g. quota), try this once
+# fallback = "codex:gpt-6.1-sol@high"     # optional: any failed member/reviewer tries this
+# retries = 1                              # extra tries per seat (timeouts are not retried)
 
 [[member]]
 spec = "codex:gpt-6.1-sol@xhigh"

@@ -1,3 +1,6 @@
+# TEMPLATE: the model names below are one author's fleet, not defaults that will work
+# for you. Replace every spec with models your own accounts can run, then test the
+# seats with:  python council.py --config <this file> --check
 # Cheap smoke test: low effort, one member per backend.
 [council]
 language = "English"

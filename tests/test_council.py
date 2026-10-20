@@ -36,6 +36,54 @@ class AggregateTest(unittest.TestCase):
         ranking = council.aggregate([r1, r2, r3], ["A", "B", "C"])
         self.assertEqual(ranking, {"A": 1.5, "B": 1.5, "C": 3.0})
 
+    def test_self_votes_are_dropped(self):
+        # reviewer "x" wrote answer A and ranks it first; that vote must not count
+        r1 = council.Result(spec="x", role="reviewer", text="FINAL RANKING: A, B, C")
+        r2 = council.Result(spec="y", role="reviewer", text="FINAL RANKING: B, C, A")
+        ranking = council.aggregate([r1, r2], ["A", "B", "C"], {"A": "x", "B": "y", "C": "z"})
+        # x ranks B, C (A removed) -> B=1, C=2; y ranks C, A (B removed) -> C=1, A=2
+        self.assertEqual(ranking, {"A": 2.0, "B": 1.0, "C": 1.5})
+
+
+class RetryFallbackTest(unittest.TestCase):
+    def test_empty_answer_is_retried_then_fallback_used(self):
+        calls = []
+
+        def flaky(model, effort, prompt, scratch, timeout):
+            calls.append(model)
+            if model == "bad":
+                return ""  # empty answer, as agy sometimes returns
+            return "a fallback answer that is long enough to count as real"
+
+        with mock.patch.dict(council.BACKENDS, {"fake": flaky}):
+            r = council._call("fake:bad", "member", "q", 60, fallback="fake:good", retries=1)
+        self.assertEqual(calls, ["bad", "bad", "good"])
+        self.assertEqual(r.spec, "fake:good")
+        self.assertIsNone(r.error)
+        self.assertEqual(len(r.attempts), 2)
+
+    def test_timeout_is_not_retried_on_same_seat(self):
+        calls = []
+
+        def slow(model, effort, prompt, scratch, timeout):
+            calls.append(model)
+            raise TimeoutError("exceeded")
+
+        with mock.patch.dict(council.BACKENDS, {"fake": slow}):
+            r = council._call("fake:slow", "member", "q", 60, retries=2)
+        self.assertEqual(calls, ["slow"])
+        self.assertIn("TimeoutError", r.error)
+
+
+class CheckTest(unittest.TestCase):
+    def test_check_reports_failing_seat(self):
+        cfg = {"council": {"reviewers": ["fake:r1"], "boss": "broken:chair"},
+               "member": [{"spec": "fake:m1"}, {"spec": "fake:m1"}]}
+        with mock.patch.dict(council.BACKENDS, {"fake": fake_backend, "broken": failing_backend}):
+            self.assertEqual(council.check(cfg, 60), 1)
+            cfg["council"]["boss"] = "none"
+            self.assertEqual(council.check(cfg, 60), 0)
+
 
 class RunHygieneTest(unittest.TestCase):
     def test_utf8_output(self):
@@ -137,6 +185,37 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("simulated quota error", errors[0])
         mapping = json.loads((out / "mapping-private.json").read_text(encoding="utf-8"))
         self.assertEqual(sorted(mapping[k] for k in ("A", "B")), ["fake:m1", "fake:m2"])
+
+
+class DiscoveryTest(unittest.TestCase):
+    def test_codex_cache_and_agy_listing(self):
+        home = Path(tempfile.mkdtemp())
+        (home / "models_cache.json").write_text(json.dumps({"models": [
+            {"slug": "gpt-x", "display_name": "GPT-X", "visibility": "list",
+             "supported_reasoning_levels": [{"effort": "low"}, {"effort": "xhigh"}]},
+            {"slug": "hidden", "visibility": "hide"}]}), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            self.assertEqual(council._codex_models(),
+                             [{"spec": "codex:gpt-x", "name": "GPT-X", "efforts": ["low", "xhigh"]}])
+        listing = "Fetching available models...\ngemini-z-high\tGemini Z (High)\n"
+        with mock.patch.object(council, "_run", return_value=listing):
+            self.assertEqual(council._agy_models()[0]["spec"], "agy:gemini-z-high")
+
+    def test_setup_wizard_writes_a_valid_config(self):
+        found = {"codex": [{"spec": "codex:gpt-x", "name": "X", "efforts": ["low", "xhigh"]}],
+                 "agy": [{"spec": "agy:gem-high", "name": "G", "efforts": []}],
+                 "opencode": "not installed", "claude": "not installed"}
+        # language=Türkçe, suggested members, effort default (xhigh), reviewers default,
+        # chair = first member, no --check
+        answers = iter(["2", "", "", "", "", "2"])
+        target = Path(tempfile.mkdtemp()) / "default.toml"
+        with mock.patch.object(council, "discover_models", return_value=found),                 mock.patch("builtins.input", lambda _: next(answers)):
+            council.setup_wizard(target)
+        cfg = council.tomllib.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["council"]["language"], "Türkçe")
+        self.assertEqual([m["spec"] for m in cfg["member"]], ["codex:gpt-x@xhigh", "agy:gem-high"])
+        self.assertEqual(cfg["council"]["boss"], "codex:gpt-x@xhigh")
+        self.assertEqual(cfg["council"]["boss_fallback"], "agy:gem-high")
 
 
 if __name__ == "__main__":

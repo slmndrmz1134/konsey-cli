@@ -10,6 +10,9 @@ Pipeline (karpathy/llm-council, adapted from the paldom/llm-council-skills harne
 Usage:
   python council.py --config examples/fleet.toml --question-file q.md --out runs/run1
         [--context-file brief.md ...] [--no-review] [--boss none]
+  python council.py --config my.toml --check     (ping every seat, run nothing else)
+  python council.py --list-models [--json]       (models each installed CLI offers)
+  python council.py --setup                      (pick members interactively -> default.toml)
 
 Model specs: "<backend>:<model>[@effort]"
   codex:gpt-6.1-sol@xhigh          Codex CLI (exec, read-only sandbox)
@@ -18,6 +21,9 @@ Model specs: "<backend>:<model>[@effort]"
   opencode:opencode/glm-5.3-flash-free@max
   nvidia:z-ai/glm-5.3              NVIDIA API (key from NVIDIA_API_KEY)
   claude:claude-opus-5-5           Claude Code CLI (uses the user's Claude quota)
+
+Optional [council] keys: retries (default 1), fallback, boss_fallback, workspace.
+A [[member]] may set its own fallback. The example configs are templates.
 """
 from __future__ import annotations
 
@@ -35,12 +41,13 @@ import time
 import tomllib
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 DEFAULT_TIMEOUT_S = 1800
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 AGY = os.environ.get("AGY_EXE") or shutil.which("agy") or "agy"
+WORKSPACE: str | None = None  # [council] workspace = "<dir>": copied into each member's scratch
 LENSES = [
     "precision: be concrete and correct; prefer fewer, well-supported points",
     "breadth: surface options and angles the others will likely miss",
@@ -166,10 +173,14 @@ def run_opencode(model, effort, prompt, scratch, timeout):
 
 
 def run_claude(model, effort, prompt, scratch, timeout):
+    # with a workspace the member may read it (Read/Glob/Grep/LS), never write or run
+    blocked = "WebSearch,WebFetch,Write,Edit,MultiEdit,Bash,NotebookEdit,Task,Agent"
+    if not WORKSPACE:
+        blocked += ",Read,Glob,Grep,LS"
     cmd = ["claude", "-p", "--model", model, "--no-session-persistence", "--strict-mcp-config",
-           "--disallowed-tools",
-           "WebSearch,WebFetch,Write,Edit,MultiEdit,Bash,Read,Glob,Grep,LS,NotebookEdit,Task,Agent",
-           "--output-format", "json"]
+           "--disallowed-tools", blocked, "--output-format", "json"]
+    if effort:
+        cmd += ["--effort", effort]
     data = json.loads(_run(cmd, scratch, timeout, stdin_text=prompt))
     if data.get("is_error"):
         raise RuntimeError(f"claude: {str(data)[:1000]}")
@@ -198,6 +209,8 @@ def complete(spec: str, prompt: str, timeout: int) -> str:
     if backend not in BACKENDS:
         raise ValueError(f"unknown backend in {spec!r}")
     scratch = tempfile.mkdtemp(prefix="council-")  # empty dir: nothing to read or mutate
+    if WORKSPACE:  # optional read-only material: each member gets its own throwaway copy
+        shutil.copytree(WORKSPACE, Path(scratch) / "workspace")
     text = BACKENDS[backend](model, effort, prompt, scratch, timeout)
     if len(text.strip()) < 40:
         raise RuntimeError(f"answer too short: {text!r}")
@@ -213,25 +226,44 @@ class Result:
     text: str | None = None
     error: str | None = None
     seconds: float = 0.0
+    attempts: list[str] = field(default_factory=list)  # errors of failed tries before success
 
 
-def _call(spec: str, role: str, prompt: str, timeout: int) -> Result:
+def _call(spec: str, role: str, prompt: str, timeout: int,
+          fallback: str | None = None, retries: int = 1) -> Result:
+    """Try `spec` up to 1+retries times (a timeout is not retried), then `fallback` once.
+    Empty or near-empty answers count as failures, so they are retried too."""
     r = Result(spec=spec, role=role)
     t0 = time.time()
-    try:
-        r.text = complete(spec, prompt, timeout)
-    except Exception as exc:  # noqa: BLE001 - one bad member must not sink the council
-        r.error = f"{type(exc).__name__}: {exc}"
+    tries = [spec] * (1 + max(0, retries)) + ([fallback] if fallback and fallback != spec else [])
+    for i, s in enumerate(tries):
+        if i and s == spec and r.attempts and r.attempts[-1].startswith(f"{s}: TimeoutError"):
+            continue  # waiting another full timeout on the same seat rarely helps
+        try:
+            r.text, r.spec = complete(s, prompt, timeout), s
+            break
+        except Exception as exc:  # noqa: BLE001 - one bad member must not sink the council
+            r.attempts.append(f"{s}: {type(exc).__name__}: {exc}")
+    if not r.text:
+        r.error = " | ".join(a[:600] for a in r.attempts)
     r.seconds = round(time.time() - t0, 1)
-    print(f"  [{'ok' if r.text else 'FAIL'}] {spec} ({r.seconds}s)"
-          + (f" -> {r.error[:200]}" if r.error else ""), flush=True)
+    via = f" via fallback {r.spec}" if r.text and r.spec != spec else ""
+    print(f"  [{'ok' if r.text else 'FAIL'}] {spec}{via} ({r.seconds}s)"
+          + (f" -> {r.error[:200]}" if r.error else "")
+          + (f" (after {len(r.attempts)} failed tries)" if r.text and r.attempts else ""),
+          flush=True)
     return r
 
 
-def _parallel(jobs: list[tuple[str, str, str]], timeout: int) -> list[Result]:
+def _parallel(jobs: list[tuple[str, str, str]], timeout: int,
+              fallbacks: list[str | None] | None = None, retries: int = 1) -> list[Result]:
+    fallbacks = fallbacks or [None] * len(jobs)
+    # worst case per job: (1+retries) tries of the seat plus one fallback try
+    budget = (timeout + 120) * (2 + max(0, retries))
     with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
-        futs = [pool.submit(_call, spec, role, prompt, timeout) for spec, role, prompt in jobs]
-        return [f.result(timeout=timeout + 120) for f in futs]
+        futs = [pool.submit(_call, spec, role, prompt, timeout, fb, retries)
+                for (spec, role, prompt), fb in zip(jobs, fallbacks)]
+        return [f.result(timeout=budget) for f in futs]
 
 
 def member_prompt(question: str, context: str, role: str, lang: str) -> str:
@@ -269,12 +301,24 @@ def boss_prompt(question, context, bundle, reviews, ranking, lang):
             + f"QUESTION:\n{question}\n\nMEMBER ANSWERS:\n{bundle}\n\n"
             f"PEER REVIEWS:\n{reviews or '(none)'}\n\nAGGREGATE RANKING (mean rank, lower is "
             f"better): {json.dumps(ranking, ensure_ascii=False)}\n\n"
-            f"Write in {lang}, Markdown: the decision, the reasoning, what to do now vs later vs "
-            f"never, open risks to verify, and decisions left to the human. Do not mention model "
-            f"names.")
+            f"Write in {lang}, Markdown, with exactly these sections:\n"
+            f"1. Decision: the answer, stated first and plainly.\n"
+            f"2. Agreements: points most answers share (cite labels).\n"
+            f"3. Disagreements: each conflict, which side is right and why.\n"
+            f"4. Unique findings: points raised by only ONE answer (cite the label). Do not drop "
+            f"them for being in the minority; say whether each looks right, wrong or unproven.\n"
+            f"5. Plan: what to do now, later, and never.\n"
+            f"6. Verify: a checklist of factual, legal, numeric or code claims the decision rests "
+            f"on that nobody has actually checked.\n"
+            f"7. Left to the human: decisions you should not make for them.\n"
+            f"Do not mention model names.")
 
 
-def aggregate(reviews: list[Result], labels: list[str]) -> dict:
+def aggregate(reviews: list[Result], labels: list[str],
+              authors: dict[str, str] | None = None) -> dict:
+    """Mean rank per label. If `authors` (label -> spec) is given, a reviewer's vote on an
+    answer written by the same spec is dropped: models tend to rank their own answer first."""
+    authors = authors or {}
     ranks: dict[str, list[int]] = {lab: [] for lab in labels}
     for r in reviews:
         if not r.text:
@@ -285,9 +329,167 @@ def aggregate(reviews: list[Result], labels: list[str]) -> dict:
         if not m:
             continue
         order = [x for x in re.split(r"[\s,>]+", m.group(1).upper()) if x in ranks]
-        for pos, label in enumerate(dict.fromkeys(order), 1):
+        order = [x for x in dict.fromkeys(order) if authors.get(x) != r.spec]
+        for pos, label in enumerate(order, 1):
             ranks[label].append(pos)
     return {lab: round(sum(v) / len(v), 2) if v else None for lab, v in ranks.items()}
+
+
+# ---------------------------------------------------------------- model discovery / setup
+CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+
+
+def _codex_models() -> list[dict]:
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    data = json.loads((home / "models_cache.json").read_text(encoding="utf-8"))
+    return [{"spec": f"codex:{m['slug']}", "name": m.get("display_name", m["slug"]),
+             "efforts": [e["effort"] for e in m.get("supported_reasoning_levels", [])]}
+            for m in data.get("models", []) if m.get("visibility", "list") == "list"]
+
+
+def _agy_models() -> list[dict]:
+    out = _run([AGY, "models"], tempfile.mkdtemp(), 90)
+    rows = [ln.split("\t") for ln in out.splitlines() if "\t" in ln]
+    return [{"spec": f"agy:{r[0].strip()}", "name": r[1].strip(), "efforts": []} for r in rows]
+
+
+def _opencode_models() -> list[dict]:
+    out = _run(["opencode", "models"], tempfile.mkdtemp(), 90, keep_env=("NVIDIA_API_KEY",))
+    return [{"spec": f"opencode:{ln.strip()}", "name": ln.strip(), "efforts": []}
+            for ln in out.splitlines() if "/" in ln and " " not in ln.strip()]
+
+
+def _claude_models() -> list[dict]:
+    if not shutil.which("claude"):
+        raise FileNotFoundError("claude CLI not found")
+    return [{"spec": f"claude:{a}", "name": f"Claude {a} (latest, spends Claude quota)",
+             "efforts": CLAUDE_EFFORTS} for a in ("opus", "sonnet", "haiku")]
+
+
+def discover_models() -> dict[str, list[dict] | str]:
+    """backend -> list of {spec, name, efforts}, or an error string if that CLI is missing."""
+    found: dict[str, list[dict] | str] = {}
+    for backend, fn, exe in (("codex", _codex_models, "codex"), ("agy", _agy_models, AGY),
+                             ("opencode", _opencode_models, "opencode"),
+                             ("claude", _claude_models, "claude")):
+        if not shutil.which(exe) and not Path(exe).exists():
+            found[backend] = "not installed"
+            continue
+        try:
+            found[backend] = fn()
+        except Exception as exc:  # noqa: BLE001 - one broken CLI must not hide the others
+            found[backend] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    return found
+
+
+def list_models(as_json: bool) -> None:
+    found = discover_models()
+    if as_json:
+        print(json.dumps(found, ensure_ascii=False, indent=2))
+        return
+    for backend, models in found.items():
+        if isinstance(models, str):
+            print(f"\n{backend}: {models}")
+            continue
+        print(f"\n{backend}: {len(models)} models")
+        for m in models:
+            eff = f"  @{'/'.join(m['efforts'])}" if m["efforts"] else ""
+            print(f"  {m['spec']:55s}{eff}")
+
+
+def _ask(prompt: str, options: list[str], default: int = 1) -> int:
+    """Numbered single choice on the terminal; returns a 0-based index."""
+    print(f"\n{prompt}")
+    for i, o in enumerate(options, 1):
+        print(f"  [{i}] {o}" + ("  (default)" if i == default else ""))
+    while True:
+        raw = input(f"choice [{default}]: ").strip()
+        if not raw:
+            return default - 1
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return int(raw) - 1
+        print("  enter one of the numbers above")
+
+
+def _with_effort(m: dict) -> str:
+    if not m["efforts"]:
+        return m["spec"]
+    pref = "xhigh" if "xhigh" in m["efforts"] else m["efforts"][-1]
+    i = _ask(f"Effort for {m['spec']}:", m["efforts"], m["efforts"].index(pref) + 1)
+    return f"{m['spec']}@{m['efforts'][i]}"
+
+
+def setup_wizard(target: Path) -> None:
+    """Interactive first-run setup: discover models, let the user pick, write the config."""
+    print("Looking for installed CLIs and their models (this can take a minute)...")
+    found = discover_models()
+    pool = [m for ms in found.values() if isinstance(ms, list) for m in ms]
+    for b, ms in found.items():
+        print(f"  {b:9s} " + (f"{len(ms)} models" if isinstance(ms, list) else ms))
+    if not pool:
+        sys.exit("No usable CLI found. Install and log in to codex, agy, opencode or claude.")
+    langs = ["English", "Türkçe", "other"]
+    lang = langs[_ask("Answer language:", langs)]
+    if lang == "other":
+        lang = input("language name: ").strip() or "English"
+    # suggestion: one model per paid CLI. Codex and Claude list their flagship first; agy
+    # encodes effort in the name, so prefer its first "-high" entry.
+    suggested = []
+    for b, ms in found.items():
+        if isinstance(ms, list) and ms and b != "opencode":
+            suggested.append(next((m for m in ms if m["spec"].endswith("-high")), ms[0]))
+    mode = _ask("Members:", [f"Suggested: one per provider -> {', '.join(m['spec'] for m in suggested)}",
+                             "I will pick each member myself"]) if suggested else 1
+    if mode == 0:
+        members = [_with_effort(m) for m in suggested]
+    else:
+        n = _ask("How many members?", ["2", "3", "4", "5", "6"], 2) + 2
+        members = []
+        for k in range(n):
+            i = _ask(f"Member {k + 1}:", [f"{m['spec']}  ({m['name']})" for m in pool])
+            members.append(_with_effort(pool[i]))
+    paid = [s for s in members if not s.startswith("opencode:")] or members
+    rv = _ask("Reviewers (rank the anonymized answers):",
+              [f"The members on paid CLIs: {', '.join(paid)}", "No peer review"])
+    reviewers = paid if rv == 0 else []
+    ch = _ask("Chair (writes the final synthesis):",
+              ["none: the agent that runs the council synthesizes"] + members, 2 if members else 1)
+    boss = "none" if ch == 0 else members[ch - 1]
+    fb = next((s for s in paid if s != boss), None)
+    lines = ["# Written by `council.py --setup`. Edit freely; re-run --check after changes.",
+             "[council]", f'language = "{lang}"', "timeout_s = 1800",
+             "reviewers = [" + ", ".join(f'"{s}"' for s in reviewers) + "]", f'boss = "{boss}"']
+    if fb:
+        lines += [f'boss_fallback = "{fb}"', f'fallback = "{fb}"']
+    for s in members:
+        lines += ["", "[[member]]", f'spec = "{s}"']
+    if target.exists() and _ask(f"{target.name} exists. Overwrite?", ["no", "yes"]) == 0:
+        sys.exit("kept the existing config")
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"\nwrote {target}")
+    if _ask("Test every seat now with --check?", ["yes", "no"]) == 0:
+        cfg = tomllib.loads(target.read_text(encoding="utf-8"))
+        check(cfg, 300)
+
+
+def check(cfg: dict, timeout: int) -> int:
+    """Ping every distinct seat (members, reviewers, boss, fallbacks) with a tiny prompt."""
+    c = cfg.get("council", {})
+    seats = [m["spec"] for m in cfg.get("member", [])] + c.get("reviewers", [])
+    seats += [c.get("boss", "none"), c.get("fallback")]
+    seats += [m.get("fallback") for m in cfg.get("member", [])]
+    seats = [s for s in dict.fromkeys(seats) if s and s != "none"]
+    prompt = ("Health check for a council tool. Reply with one plain sentence of at least ten "
+              "words saying that you are ready. No other text.")
+    results = _parallel([(s, "check", prompt) for s in seats], min(timeout, 300), retries=0)
+    print("\nseat check:")
+    for r in results:
+        print(f"  {'OK  ' if r.text else 'FAIL'} {r.spec:50s} {r.seconds:7.1f}s"
+              + (f"  {r.error[:160]}" if r.error else ""))
+    bad = sum(1 for r in results if not r.text)
+    print(f"\n{len(results) - bad}/{len(results)} seats answered."
+          + (" Fix or remove the failing seats before a real run." if bad else ""))
+    return 1 if bad else 0
 
 
 def main() -> None:
@@ -297,18 +499,41 @@ def main() -> None:
     local = here / "default.toml"  # personal config, gitignored
     ap.add_argument("--config",
                     default=str(local if local.exists() else here / "examples" / "fleet.toml"))
-    ap.add_argument("--question-file", required=True)
+    ap.add_argument("--question-file")
     ap.add_argument("--context-file", action="append", default=[])
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out")
     ap.add_argument("--no-review", action="store_true")
     ap.add_argument("--boss", help="override boss spec; 'none' skips synthesis")
+    ap.add_argument("--check", action="store_true",
+                    help="send a tiny prompt to every seat in the config and report which work")
+    ap.add_argument("--list-models", action="store_true",
+                    help="list the models each installed CLI offers (add --json for machines)")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--setup", action="store_true",
+                    help="interactive first-run setup; writes default.toml (or --config path)")
     args = ap.parse_args()
+    if args.list_models:
+        return list_models(args.json)
+    if args.setup:
+        explicit = any(x.startswith("--config") for x in sys.argv[1:])
+        return setup_wizard(Path(args.config) if explicit else local)
 
     cfg = tomllib.loads(Path(args.config).read_text(encoding="utf-8"))
     c = cfg.get("council", {})
     lang = c.get("language", "English")
     timeout = int(c.get("timeout_s", DEFAULT_TIMEOUT_S))
+    if args.check:
+        sys.exit(check(cfg, timeout))
+    if not (args.question_file and args.out):
+        ap.error("--question-file and --out are required (unless --check)")
     boss = args.boss or c.get("boss", "none")
+    retries = int(c.get("retries", 1))
+    fallback = c.get("fallback")  # used for any seat without its own `fallback`
+    global WORKSPACE
+    if c.get("workspace"):
+        WORKSPACE = str(Path(c["workspace"]).resolve())
+        if not Path(WORKSPACE).is_dir():
+            sys.exit(f"workspace not found: {WORKSPACE}")
     reviewers = [] if args.no_review else c.get("reviewers", [])
     members = cfg.get("member", [])
     if not members:
@@ -325,7 +550,7 @@ def main() -> None:
     for i, m in enumerate(members):
         role = m.get("role") or LENSES[i % len(LENSES)]
         jobs.append((m["spec"], role, member_prompt(question, context, role, lang)))
-    proposals = _parallel(jobs, timeout)
+    proposals = _parallel(jobs, timeout, [m.get("fallback", fallback) for m in members], retries)
     ok = [p for p in proposals if p.text]
     if not ok:
         sys.exit(f"all members failed: {[p.error for p in proposals]}")
@@ -341,22 +566,25 @@ def main() -> None:
 
     reviews: list[Result] = []
     ranking: dict = {}
+    ranking_raw: dict = {}
     if reviewers:
         print(time.strftime("%H:%M:%S"), f"stage 2: {len(reviewers)} reviewers", flush=True)
         rp = review_prompt(question, context, bundle, labels, lang)
-        reviews = _parallel([(s, "reviewer", rp) for s in reviewers], timeout)
+        reviews = _parallel([(s, "reviewer", rp) for s in reviewers], timeout,
+                            [fallback] * len(reviewers), retries)
         for i, r in enumerate(reviews, 1):
             r.label = f"R{i}"
             if r.text:
                 (out / "stage2" / f"review-{r.label}.md").write_text(r.text, encoding="utf-8")
-        ranking = aggregate(reviews, labels)
+        ranking_raw = aggregate(reviews, labels)
+        ranking = aggregate(reviews, labels, {p.label: p.spec for p in ok})
 
     final_text = None
     if boss != "none":
         print(time.strftime("%H:%M:%S"), f"stage 3: boss {boss}", flush=True)
         rev_block = "\n\n".join(f"=== REVIEW {r.label} ===\n{r.text}" for r in reviews if r.text)
         b = _call(boss, "chair", boss_prompt(question, context, bundle, rev_block, ranking, lang),
-                  timeout)
+                  timeout, c.get("boss_fallback", fallback), retries)
         final_text = b.text
         if not final_text:  # never a dead end: fall back to the best-ranked answer
             ranked = [lab for lab, _ in sorted(ranking.items(), key=lambda kv: (kv[1] is None, kv[1]))]
@@ -366,6 +594,7 @@ def main() -> None:
         (out / "final.md").write_text(final_text, encoding="utf-8")
 
     run = {"question": question, "config": args.config, "boss": boss, "ranking": ranking,
+           "ranking_with_self_votes": ranking_raw,
            "members": [asdict(p) | {"text": None} for p in proposals],
            "reviews": [asdict(r) | {"text": None} for r in reviews]}
     (out / "run.json").write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
