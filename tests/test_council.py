@@ -142,7 +142,7 @@ class OpencodeRetryTest(unittest.TestCase):
         calls = []
         event = json.dumps({"type": "text", "part": {"text": "an answer that is long enough to count"}})
 
-        def fake_run(cmd, cwd, timeout, stdin_text=None, keep_env=()):
+        def fake_run(cmd, cwd, timeout, stdin_text=None, keep_env=(), extra_env=None):
             calls.append(cmd)
             if len(calls) == 1:
                 raise RuntimeError("opencode exited 1: Error: Unexpected error\n\ndatabase is locked")
@@ -216,6 +216,22 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual([m["spec"] for m in cfg["member"]], ["codex:gpt-x@xhigh", "agy:gem-high"])
         self.assertEqual(cfg["council"]["boss"], "codex:gpt-x@xhigh")
         self.assertEqual(cfg["council"]["boss_fallback"], "agy:gem-high")
+
+
+class StageFilesTest(unittest.TestCase):
+    def test_only_named_files_are_copied_with_layout(self):
+        proj = Path(tempfile.mkdtemp())
+        (proj / "paper").mkdir()
+        (proj / "results").mkdir()
+        (proj / "paper" / "main.tex").write_text("tex", encoding="utf-8")
+        (proj / "results" / "a.json").write_text("{}", encoding="utf-8")
+        (proj / "results" / "b.json").write_text("{}", encoding="utf-8")
+        (proj / "big.bin").write_bytes(b"x" * 1000)
+        stage, size = council.stage_files(
+            [str(proj / "paper" / "main.tex"), str(proj / "results" / "*.json")], str(proj))
+        got = sorted(p.relative_to(stage).as_posix() for p in Path(stage).rglob("*") if p.is_file())
+        self.assertEqual(got, ["paper/main.tex", "results/a.json", "results/b.json"])
+        self.assertEqual(size, 7)
 
 
 if __name__ == "__main__":

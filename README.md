@@ -109,6 +109,7 @@ Output files:
 
 Options:
 - `--context-file brief.md` (repeatable) inlines shared background into every prompt.
+- `--file <path|glob>` (repeatable) with optional `--root <dir>` gives members only these files to open, e.g. `--root . --file paper/main.tex --file "results/*.json"`. Each prompt lists the files with their paths. Prefer this to `workspace`, which copies a whole folder.
 - `--no-review` skips stage 2.
 - `--boss none` skips stage 3, for when your own agent will synthesize.
 
@@ -146,7 +147,7 @@ Model specs have the form `<backend>:<model>[@effort]`:
 
 Example configs: `examples/smoke.toml` (cheap, low effort), `examples/fleet.toml` (five members and three reviewers), `examples/personas.toml` (stakeholder personas). A personal `default.toml` next to `council.py` is used when present, and it is gitignored.
 
-**`workspace`** copies a folder (code, results, a paper) into each member's scratch directory so members can open the files themselves instead of having everything inlined. It is read-only: members cannot write or run commands. Only the `codex` and `claude` backends actually read it. Antigravity models tend to try running commands, get refused and return an empty answer, and OpenCode models ignore the folder. For those seats, put the material in `--context-file` instead.
+**`workspace`** copies a folder (code, results, a paper) into each member's scratch directory so members can open the files themselves instead of having everything inlined. Every prompt gets the folder's path and a file list, so no member needs to search for files. Codex reads through its read-only sandbox, Claude, Antigravity and OpenCode through their file tools. Claude members run with edit, shell and web tools disallowed, OpenCode members are started with a permission config that denies them, and each member only ever sees a throwaway copy. Tested with Codex, Gemini (agy), GLM and DeepSeek (opencode): all four read the files and quoted them correctly. Large folders slow members down; copy in only what the question needs.
 
 ## Gotchas this tool already handles
 

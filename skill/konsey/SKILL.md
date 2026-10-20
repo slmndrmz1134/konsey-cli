@@ -43,13 +43,17 @@ description: Runs a multi-model LLM council (karpathy/llm-council style) over lo
    - For personas, copy it next to the question and give each `[[member]]` a `role`. Put the
      most important persona on the strongest model.
    - Set `language` to the user's language.
-   - `workspace = "<dir>"` lets members open files themselves, but only the `codex` and
-     `claude` backends read it. For agy and opencode seats, inline the material with
-     `--context-file`.
+   - **Documents members should read:** pick the files this question actually needs (the
+     paper, the two scripts in question, the result files) and pass each with `--file`
+     (globs allowed, e.g. `--file "results/*.json"`), plus `--root <project>` to keep the
+     folder layout. Only those files are copied; every prompt lists them with their paths,
+     and all backends can open them. Do not hand over a whole project; tell the user which
+     files you chose. Use `--context-file` for a short brief everyone must see inline.
+   - `workspace = "<dir>"` in the config copies a whole folder instead; `--file` overrides it.
 5. **Tell the user it will take a while.** A run takes 5–30 min. Then run it in the background
    with a long timeout:
    ```
-   python council.py --config <toml> --question-file <q.md> [--context-file <ctx.md>] --out <dir>
+   python council.py --config <toml> --question-file <q.md> [--context-file <ctx.md>]        [--root <project> --file <path> ...] --out <dir>
    ```
    - `--no-review` skips peer ranking.
    - `--boss none` skips synthesis, for when you will synthesize yourself.

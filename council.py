@@ -9,7 +9,8 @@ Pipeline (karpathy/llm-council, adapted from the paldom/llm-council-skills harne
 
 Usage:
   python council.py --config examples/fleet.toml --question-file q.md --out runs/run1
-        [--context-file brief.md ...] [--no-review] [--boss none]
+        [--context-file brief.md ...] [--file paper.tex --file "results/*.json" ...]
+        [--no-review] [--boss none]
   python council.py --config my.toml --check     (ping every seat, run nothing else)
   python council.py --list-models [--json]       (models each installed CLI offers)
   python council.py --setup                      (pick members interactively -> default.toml)
@@ -28,6 +29,7 @@ A [[member]] may set its own fallback. The example configs are templates.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import random
@@ -53,6 +55,9 @@ LENSES = [
     "breadth: surface options and angles the others will likely miss",
     "skeptic: attack assumptions, name risks and failure modes, say what not to do",
 ]
+# opencode members may read the workspace copy but never edit, run commands or browse
+OPENCODE_READ_ONLY = json.dumps({"permission": {"edit": "deny", "bash": "deny",
+                                                "webfetch": "deny", "external_directory": "deny"}})
 SECRET_ENV_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", re.I)
 RANKING_RE = re.compile(r"FINAL RANKING:\s*([A-Z](?:\s*[,>]\s*[A-Z])*)", re.I)
 
@@ -80,12 +85,12 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 def _run(cmd: list[str], cwd: str, timeout: int, stdin_text: str | None = None,
-         keep_env: tuple[str, ...] = ()) -> str:
+         keep_env: tuple[str, ...] = (), extra_env: dict | None = None) -> str:
     """Process-group kill on timeout, explicit UTF-8, hard timeout, scrubbed env,
     scratch cwd, and stdin=DEVNULL unless we feed a prompt (agy hangs otherwise)."""
     exe = shutil.which(cmd[0]) or cmd[0]
     kwargs: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-                        errors="replace", env=_child_env(keep_env), cwd=cwd,
+                        errors="replace", env=_child_env(keep_env) | (extra_env or {}), cwd=cwd,
                         stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL)
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -141,8 +146,10 @@ def run_agy(model, effort, prompt, scratch, timeout):
 def run_opencode(model, effort, prompt, scratch, timeout):
     pf = Path(scratch) / "prompt.md"
     pf.write_text(prompt, encoding="utf-8")
-    cmd = ["opencode", "run", "Follow the instructions in the attached file. Do not use any tools.",
-           "-m", model, "--format", "json", "--dir", scratch, "-f", str(pf)]
+    msg = ("Follow the instructions in the attached file. You may only read files under "
+           "./workspace; do not edit files or run commands." if WORKSPACE else
+           "Follow the instructions in the attached file. Do not use any tools.")
+    cmd = ["opencode", "run", msg, "-m", model, "--format", "json", "--dir", scratch, "-f", str(pf)]
     if effort:
         cmd[4:4] = ["--variant", effort]
     # opencode's config resolves the NVIDIA provider key from the env at startup.
@@ -150,7 +157,8 @@ def run_opencode(model, effort, prompt, scratch, timeout):
     # startup ("database is locked"); back off and retry instead of failing.
     for attempt in range(4):
         try:
-            out = _run(cmd, scratch, timeout, keep_env=("NVIDIA_API_KEY",))
+            out = _run(cmd, scratch, timeout, keep_env=("NVIDIA_API_KEY",),
+                       extra_env={"OPENCODE_CONFIG_CONTENT": OPENCODE_READ_ONLY})
             break
         except RuntimeError as exc:
             if "database is locked" not in str(exc) or attempt == 3:
@@ -204,6 +212,57 @@ BACKENDS = {"codex": run_codex, "agy": run_agy, "opencode": run_opencode,
             "claude": run_claude, "nvidia": run_nvidia}
 
 
+def workspace_note(ws: Path, backend: str = "", limit: int = 400) -> str:
+    """Tell every member where the files are and list them, so no member needs `ls`/`grep`
+    (agy and opencode members give up when a shell command is refused)."""
+    files = sorted(p for p in ws.rglob("*") if p.is_file())
+    # codex reads through read-only shell commands; the others have file tools
+    how = ("Read the files with read-only commands such as `cat`, `ls`, `rg`; the sandbox "
+           "is read-only, so do not try to write." if backend == "codex" else
+           "Open the files you need with your file-reading tool. You cannot run shell "
+           "commands or edit files; do not try, just read.")
+    rows = [f"- workspace/{p.relative_to(ws).as_posix()} ({p.stat().st_size} bytes)"
+            for p in files[:limit]]
+    more = f"\n- ... and {len(files) - limit} more files" if len(files) > limit else ""
+    return ("PROJECT FILES (read-only): a copy of the project is in the folder `workspace` "
+            f"next to you (absolute path: {ws}). {how} Base your answer on what the files "
+            "actually say. File list:\n"
+            + "\n".join(rows) + more + "\n\n")
+
+
+def stage_files(paths: list[str], root: str | None = None) -> tuple[str, int]:
+    """Copy only the given files/dirs (globs allowed) into one temp folder that becomes the
+    workspace. Layout is kept relative to `root` (default: the paths' common parent).
+    Returns (folder, total bytes)."""
+    items: list[Path] = []
+    for p in paths:
+        hits = glob.glob(p, recursive=True) or [p]
+        for h in hits:
+            hp = Path(h).resolve()
+            if not hp.exists():
+                sys.exit(f"--file not found: {p}")
+            items.append(hp)
+    try:
+        base = Path(root).resolve() if root else Path(os.path.commonpath(
+            [str(i if i.is_dir() else i.parent) for i in items]))
+    except ValueError:  # different drives on Windows
+        base = None
+    stage = Path(tempfile.mkdtemp(prefix="council-files-"))
+    for i in dict.fromkeys(items):
+        try:
+            rel = i.relative_to(base) if base else Path(i.name)
+        except ValueError:
+            rel = Path(i.name)
+        dst = stage / rel if str(rel) != "." else stage / i.name
+        if i.is_dir():
+            shutil.copytree(i, dst, dirs_exist_ok=True)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(i, dst)
+    size = sum(f.stat().st_size for f in stage.rglob("*") if f.is_file())
+    return str(stage), size
+
+
 def complete(spec: str, prompt: str, timeout: int) -> str:
     backend, model, effort = parse_spec(spec)
     if backend not in BACKENDS:
@@ -211,6 +270,7 @@ def complete(spec: str, prompt: str, timeout: int) -> str:
     scratch = tempfile.mkdtemp(prefix="council-")  # empty dir: nothing to read or mutate
     if WORKSPACE:  # optional read-only material: each member gets its own throwaway copy
         shutil.copytree(WORKSPACE, Path(scratch) / "workspace")
+        prompt = workspace_note(Path(scratch) / "workspace", backend) + prompt
     text = BACKENDS[backend](model, effort, prompt, scratch, timeout)
     if len(text.strip()) < 40:
         raise RuntimeError(f"answer too short: {text!r}")
@@ -502,6 +562,10 @@ def main() -> None:
     ap.add_argument("--question-file")
     ap.add_argument("--context-file", action="append", default=[])
     ap.add_argument("--out")
+    ap.add_argument("--file", action="append", default=[],
+                    help="a file, folder or glob members may open (repeatable); only these are "
+                         "copied, and they replace the config's workspace")
+    ap.add_argument("--root", help="keep --file paths relative to this folder")
     ap.add_argument("--no-review", action="store_true")
     ap.add_argument("--boss", help="override boss spec; 'none' skips synthesis")
     ap.add_argument("--check", action="store_true",
@@ -530,7 +594,13 @@ def main() -> None:
     retries = int(c.get("retries", 1))
     fallback = c.get("fallback")  # used for any seat without its own `fallback`
     global WORKSPACE
-    if c.get("workspace"):
+    if args.file:
+        WORKSPACE, size = stage_files(args.file, args.root)
+        n = sum(1 for f in Path(WORKSPACE).rglob("*") if f.is_file())
+        print(f"files for members: {n} files, {size / 1e6:.2f} MB", flush=True)
+        if size > 20e6:
+            print("  warning: large material; every member copies and reads it", flush=True)
+    elif c.get("workspace"):
         WORKSPACE = str(Path(c["workspace"]).resolve())
         if not Path(WORKSPACE).is_dir():
             sys.exit(f"workspace not found: {WORKSPACE}")
@@ -594,7 +664,7 @@ def main() -> None:
         (out / "final.md").write_text(final_text, encoding="utf-8")
 
     run = {"question": question, "config": args.config, "boss": boss, "ranking": ranking,
-           "ranking_with_self_votes": ranking_raw,
+           "ranking_with_self_votes": ranking_raw, "files": args.file,
            "members": [asdict(p) | {"text": None} for p in proposals],
            "reviews": [asdict(r) | {"text": None} for r in reviews]}
     (out / "run.json").write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
